@@ -53,28 +53,27 @@ def process_tracking_scan(
 
     metadata = scan_metadata if scan_metadata is not None else {}
 
-    with get_db_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
+    with get_db_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
                 UPDATE packages
                 SET current_status = %s
                 WHERE package_id = %s
                 RETURNING tracking_id
                 """,
-                (status, package_id),
+            (status, package_id),
+        )
+        package = cursor.fetchone()
+
+        if package is None:
+            raise PackageNotFoundError(
+                f"No package exists with package_id={package_id}"
             )
-            package = cursor.fetchone()
 
-            if package is None:
-                raise PackageNotFoundError(
-                    f"No package exists with package_id={package_id}"
-                )
+        tracking_id = package[0]
 
-            tracking_id = package[0]
-
-            cursor.execute(
-                """
+        cursor.execute(
+            """
                 INSERT INTO tracking_events (
                     package_id,
                     location_id,
@@ -85,15 +84,15 @@ def process_tracking_scan(
                 VALUES (%s, %s, %s, %s, %s)
                 RETURNING event_id
                 """,
-                (
-                    package_id,
-                    location_id,
-                    status,
-                    scanner_id,
-                    Json(metadata),
-                ),
-            )
-            event_id = cursor.fetchone()[0]
+            (
+                package_id,
+                location_id,
+                status,
+                scanner_id,
+                Json(metadata),
+            ),
+        )
+        event_id = cursor.fetchone()[0]
 
     return {
         "event_id": event_id,
