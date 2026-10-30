@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Let the `pytest` command import the `app` package from the project root.
+pythonpath = ["."]
+testpaths = ["tests"]
