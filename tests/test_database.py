@@ -1,6 +1,10 @@
 """Integration tests for the PostgreSQL database connection."""
 
+import pytest
+
 from app.database import close_connection_pool, get_db_connection
+
+pytestmark = pytest.mark.usefixtures("require_postgres")
 
 
 def test_database_connection_and_required_tables():
