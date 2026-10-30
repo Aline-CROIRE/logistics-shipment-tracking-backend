@@ -9,6 +9,8 @@ import pytest
 
 from app.database import get_db_connection
 
+pytestmark = pytest.mark.usefixtures("require_postgres")
+
 ANALYTICS_PATH = Path(__file__).resolve().parents[1] / "sql" / "analytics.sql"
 BASE_TIME = datetime(2026, 1, 1, 8, 0, tzinfo=UTC)
 

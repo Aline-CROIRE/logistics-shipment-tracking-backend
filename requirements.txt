@@ -1,9 +1,11 @@
+# Application
+psycopg2-binary==2.9.13
+python-dotenv==1.2.4
+redis==8.1.0
+pymongo==4.19.0
 
-psycopg2-binary
-python-dotenv
-redis
-pymongo
-pytest
-pytest-cov
-ruff
-black
+# Testing and code quality
+pytest==9.2.0
+pytest-cov==7.1.0
+ruff==0.17.3
+black==26.10.1

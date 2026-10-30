@@ -3,6 +3,8 @@
 import json
 from uuid import uuid4
 
+import pytest
+
 from app.database import get_db_connection
 from app.services import tracking_integration
 
@@ -98,6 +100,7 @@ def test_scan_updates_redis_and_logs_mongodb_event(monkeypatch):
     assert document["scanner_id"] == "SCANNER-01"
     assert document["scan_metadata"] == {"device": "handheld"}
     assert document["location_name"] == "Kigali Distribution Centre"
+    assert document["received_at"].tzinfo is not None
     assert result["integration_errors"] == {}
 
 
@@ -231,6 +234,7 @@ def test_status_lookup_for_unknown_package_returns_none(monkeypatch):
     assert redis_client.values == {}
 
 
+@pytest.mark.usefixtures("require_postgres")
 def test_database_status_uses_latest_event_location():
     """The PostgreSQL fallback reports the location of the newest scan."""
     tracking_id = f"TRK-TEST-{uuid4().hex}"
