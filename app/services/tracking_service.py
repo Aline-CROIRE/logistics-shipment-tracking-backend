@@ -15,9 +15,16 @@ ALLOWED_STATUSES = {
     "Returned",
 }
 
+# A package in a final status has finished its journey and accepts no scans.
+FINAL_STATUSES = {"Delivered", "Returned"}
+
 
 class PackageNotFoundError(LookupError):
     """Raised when a scan references a package that does not exist."""
+
+
+class InvalidStatusTransitionError(ValueError):
+    """Raised when a scan targets a package that is already in a final status."""
 
 
 def process_tracking_scan(
@@ -54,14 +61,16 @@ def process_tracking_scan(
     metadata = scan_metadata if scan_metadata is not None else {}
 
     with get_db_connection() as connection, connection.cursor() as cursor:
+        # Lock the package row so concurrent scans of the same package are
+        # applied one at a time and the status check below stays valid.
         cursor.execute(
             """
-                UPDATE packages
-                SET current_status = %s
+                SELECT tracking_id, current_status
+                FROM packages
                 WHERE package_id = %s
-                RETURNING tracking_id
+                FOR UPDATE
                 """,
-            (status, package_id),
+            (package_id,),
         )
         package = cursor.fetchone()
 
@@ -70,7 +79,22 @@ def process_tracking_scan(
                 f"No package exists with package_id={package_id}"
             )
 
-        tracking_id = package[0]
+        tracking_id, current_status = package
+
+        if current_status in FINAL_STATUSES:
+            raise InvalidStatusTransitionError(
+                f"Package {tracking_id} is already {current_status} "
+                "and cannot accept further scans"
+            )
+
+        cursor.execute(
+            """
+                UPDATE packages
+                SET current_status = %s
+                WHERE package_id = %s
+                """,
+            (status, package_id),
+        )
 
         cursor.execute(
             """
