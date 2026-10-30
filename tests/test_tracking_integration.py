@@ -100,6 +100,7 @@ def test_scan_updates_redis_and_logs_mongodb_event(monkeypatch):
     assert document["scanner_id"] == "SCANNER-01"
     assert document["scan_metadata"] == {"device": "handheld"}
     assert document["location_name"] == "Kigali Distribution Centre"
+    assert document["received_at"].tzinfo is not None
     assert result["integration_errors"] == {}
 
 

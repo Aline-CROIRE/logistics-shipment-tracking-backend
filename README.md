@@ -228,9 +228,12 @@ Each processed scan is stored in the `scanner_events` collection, for example:
   "city": "Kigali", "country": "Rwanda",
   "status": "In Transit", "scanner_id": "SCANNER-KGL-01",
   "event_timestamp": "2026-10-30T06:08:57Z",
+  "received_at": "2026-10-30T06:08:57.412Z",
   "scan_metadata": {"source": "dispatch"}
 }
 ```
+
+`event_timestamp` is when the scan was recorded in PostgreSQL; `received_at` is when the service logged it to MongoDB. A unique index on `event_id` stops the same event being logged twice, and an index on `(tracking_id, event_timestamp)` serves the newest-first lookup in demo option 6.
 
 ### 6.4 Consistency Between Stores
 
