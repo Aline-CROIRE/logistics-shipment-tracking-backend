@@ -1,70 +1,28 @@
 # Logistics Shipment Tracking Backend
 
-A Python backend service developed for the PBEM04 Database Fundamentals lab. This project demonstrates relational database design, transactional data processing, Redis caching, MongoDB event logging, analytical SQL, and database query optimization.
+A Python data service for a shipment tracking company, built for the PBEM04 Database Fundamentals lab. It processes package scans from warehouses and drivers, records them transactionally in PostgreSQL, caches each package's latest status in Redis, and logs scanner events in MongoDB.
 
-The system tracks shipments and packages as they move between locations. PostgreSQL acts as the primary source of truth, Redis stores the latest package status for fast access, and MongoDB stores additional scanner-event information.
+## 1. Overview
 
-## 1. Project Objectives
-
-The project demonstrates how to:
-
-- Design a normalized relational database with appropriate primary and foreign keys.
-- Maintain data integrity using constraints and transactions.
-- Process package tracking scans using Python and `psycopg2`.
-- Use connection pooling for PostgreSQL database connections.
-- Integrate PostgreSQL with Redis and MongoDB.
-- Store flexible metadata using PostgreSQL JSONB.
-- Write analytical SQL queries using CTEs and window functions.
-- Analyze query performance using `EXPLAIN ANALYZE`.
-- Improve query performance using a composite index.
-- Validate functionality through automated tests and integration scripts.
-
-## 2. Features
-
-- Normalized PostgreSQL database containing customers, shipments, packages, locations, and tracking events.
-- Atomic package-status updates and tracking-event insertion within a PostgreSQL transaction.
-- Parameterized SQL queries to reduce SQL injection risks.
-- PostgreSQL connection pooling.
-- Redis caching of the latest package status.
-- MongoDB storage for scanner-event documents.
-- JSONB columns for flexible package and scanner metadata.
-- Tracking-history analytics using CTEs, `LAG()`, and `ROW_NUMBER()`.
-- Query performance benchmarking with `EXPLAIN ANALYZE`.
-- Composite indexing for optimized tracking-history queries.
-- Automated tests, Ruff linting, and Black formatting.
-
-## 3. Technology Stack
-
-| Technology | Purpose |
+| Store | Role |
 |---|---|
-| Python | Backend application logic |
-| PostgreSQL 16 | Primary relational database |
-| Redis 7 | Latest package-status cache |
-| MongoDB 7 | Scanner-event document storage |
-| psycopg2 | PostgreSQL connectivity |
-| redis-py | Redis integration |
-| PyMongo | MongoDB integration |
-| Docker Compose | Local database infrastructure |
-| pytest | Automated testing |
-| pytest-cov | Test coverage |
-| Ruff | Python linting |
-| Black | Python code formatting |
+| PostgreSQL 16 | Source of truth: customers, shipments, packages, locations and tracking events |
+| Redis 7 | Fast access to each package's latest status |
+| MongoDB 7 | Scanner event documents for auditing |
 
-## 4. Database Design
+Python 3.11+ connects to PostgreSQL with `psycopg2` (connection pool), to Redis with `redis-py`, and to MongoDB with `PyMongo`. Docker Compose runs all three databases locally.
 
-The database uses five core relational tables.
+## 2. Database Design
 
-| Table | Purpose |
+| Table | Stores |
 |---|---|
-| `customers` | Stores customer information |
-| `shipments` | Stores shipments associated with customers |
-| `packages` | Stores packages, tracking identifiers, current statuses, and metadata |
-| `locations` | Stores locations where package scans occur |
-| `tracking_events` | Stores the historical tracking events for packages |
+| `customers` | Customer name and unique email |
+| `shipments` | Shipments placed by a customer |
+| `packages` | Packages in a shipment, with tracking ID, current status and JSONB metadata |
+| `locations` | Warehouses and hubs where scans happen |
+| `tracking_events` | Every scan: package, location, status, time, scanner and JSONB metadata |
 
-### 4.1 Entity Relationship Diagram
-
-The following diagram illustrates the relationships between the five core tables.
+### 2.1 Entity Relationship Diagram
 
 ```mermaid
 erDiagram
@@ -114,404 +72,240 @@ erDiagram
     }
 ```
 
-### 4.2 Table Relationships
+A customer has many shipments, a shipment has many packages, and each package has many tracking events. Each event happens at one location.
 
-- **Customers → Shipments:** One customer can have multiple shipments. Each shipment belongs to a customer.
-- **Shipments → Packages:** One shipment can contain multiple packages. Each package belongs to a shipment.
-- **Packages → Tracking Events:** One package can have multiple tracking events throughout its journey.
-- **Locations → Tracking Events:** One location can be associated with multiple tracking events.
+### 2.2 Normalization
 
-### 4.3 Data Integrity and Database Design
+The schema is in third normal form (3NF):
 
-The schema uses:
+- Every table has a single-column surrogate primary key, and every other column describes only that row's entity.
+- Customer details are stored once in `customers` and referenced by `shipments`, rather than repeated on every shipment or package.
+- Location details are stored once in `locations`. Each event references a location by `location_id` instead of repeating its name, city and country.
+- The scan history is kept in `tracking_events`, one row per scan, rather than in repeated columns on `packages`.
 
-- **Primary keys:** Uniquely identify records in each table.
-- **Foreign keys:** Connect related records and maintain referential integrity.
-- **Unique constraints:** Prevent duplicate customer emails, shipment numbers, and tracking IDs.
-- **NOT NULL constraints:** Ensure required fields contain values.
-- **CHECK constraints:** Restrict package and event statuses to supported values.
-- **JSONB:** Stores flexible package and scanner metadata without requiring additional relational columns for every possible attribute.
-- **Timestamps:** Record when packages and tracking events are created.
+`packages.current_status` is a deliberate exception: it can be derived from the package's latest event. It is stored because "what is this package's status now?" is the most frequent question and the assignment requires it. The copy cannot drift because every scan updates the status and inserts the event in the same transaction.
 
-The design separates customers, shipments, packages, locations, and tracking events into related tables to reduce unnecessary duplication and improve data consistency.
+### 2.3 Integrity Rules
 
-## 5. Project Structure
+- **Keys:** `BIGINT` identity primary keys. Foreign keys use `ON DELETE RESTRICT`, so history cannot be orphaned.
+- **Unique:** customer email, shipment number, tracking ID, and the location (name, city, country).
+- **NOT NULL** on all required columns.
+- **CHECK:** statuses must be one of `Created`, `In Transit`, `Out for Delivery`, `Delivered`, `Delayed`, `Returned`. JSONB columns must contain a JSON object.
+- **JSONB** holds flexible attributes, such as `{"weight_kg": 2.5, "fragile": true}` on a package.
+- **Timestamps** use `TIMESTAMPTZ`, so times from different regions compare correctly.
+
+## 3. Project Structure
 
 ```text
-logistics-shipment-tracking-backend/
-│
-├── app/
-│   ├── __init__.py
-│   ├── database.py
-│   ├── external_stores.py
-│   └── services/
-│       ├── __init__.py
-│       ├── tracking_service.py
-│       └── tracking_integration.py
-│
-├── docs/
-│   └── performance-report.md
-│
-├── scripts/
-│   ├── benchmark_tracking_queries.py
-│   ├── verify_end_to_end_scan.py
-│   └── verify_external_stores.py
-│
-├── sql/
-│   ├── schema.sql
-│   ├── seed.sql
-│   ├── analytics.sql
-│   └── indexes.sql
-│
-├── tests/
-│   ├── test_database.py
-│   ├── test_tracking_integration.py
-│   └── test_tracking_service.py
-│
-├── .env.example
-├── .gitignore
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+app/
+  database.py                  PostgreSQL connection pool and transaction context
+  external_stores.py           Redis and MongoDB clients
+  services/
+    tracking_service.py        process_tracking_scan(): the PostgreSQL transaction
+    tracking_integration.py    Publishes scans to Redis/MongoDB; reads cached status
+sql/
+  schema.sql                   Tables and constraints
+  seed.sql                     Sample data (TRK-1001 to TRK-1004)
+  indexes.sql                  Composite index for tracking history
+  analytics.sql                CTE and window-function queries
+scripts/
+  benchmark_tracking_queries.py   EXPLAIN ANALYZE benchmark, before and after the index
+  verify_external_stores.py       Live Redis and MongoDB check
+  verify_end_to_end_scan.py       Live scan across all three stores
+tests/                         pytest suite
+docs/performance-report.md     Benchmark method, results and query plans
+demo.py                        Interactive demonstration menu
+docker-compose.yml             PostgreSQL, Redis and MongoDB services
 ```
 
-## 6. Prerequisites
+## 4. Setup
 
-Install the following tools:
+Prerequisites: Git, Python 3.11 or later, and Docker Desktop. The commands below are for PowerShell.
 
-- Git
-- Python 3.11 or later
-- Docker Desktop
-- Docker Compose
-- Visual Studio Code (recommended)
-
-## 7. Installation and Setup
-
-### 7.1 Clone the Repository
+**1. Clone and create a virtual environment**
 
 ```powershell
 git clone https://github.com/Aline-CROIRE/logistics-shipment-tracking-backend.git
 cd logistics-shipment-tracking-backend
-```
-
-### 7.2 Create and Activate a Virtual Environment
-
-```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-### 7.3 Install Dependencies
-
-```powershell
-python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 7.4 Configure Environment Variables
+If PowerShell blocks the activation script, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first. Activate the environment in every new terminal before running the project.
 
-Create a local environment file:
+**2. Configure environment variables**
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Update `.env` with your local database credentials.
+Set `POSTGRES_PASSWORD` in `.env`. The other values in `.env.example` match `docker-compose.yml`. Never commit `.env`.
 
-Example configuration:
+| Variable | Default | Purpose |
+|---|---|---|
+| `POSTGRES_HOST`, `POSTGRES_PORT` | `localhost`, `5432` | PostgreSQL address |
+| `POSTGRES_DB`, `POSTGRES_USER` | `logistics`, `logistics_user` | Database and user |
+| `POSTGRES_PASSWORD` | none | Required. Docker Compose also uses it to create the user. |
+| `REDIS_HOST`, `REDIS_PORT` | `localhost`, `6379` | Redis address |
+| `MONGODB_URI`, `MONGODB_DATABASE` | `mongodb://localhost:27017/`, `logistics` | MongoDB address and database |
 
-```env
-POSTGRES_DB=logistics
-POSTGRES_USER=logistics_user
-POSTGRES_PASSWORD=your_local_password
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-
-REDIS_HOST=localhost
-REDIS_PORT=6379
-
-MONGODB_URI=mongodb://localhost:27017/
-MONGODB_DATABASE=logistics
-```
-
-Do not commit `.env` or share its credentials. The `.env.example` file provides the configuration template.
-
-### 7.5 Start the Database Services
-
-Start PostgreSQL, Redis, and MongoDB:
+**3. Start the databases**
 
 ```powershell
 docker compose up -d --wait
 ```
 
-Check their status:
+All three services should show as healthy in `docker compose ps`.
+
+**4. Create the schema, load sample data and add the index**
 
 ```powershell
-docker compose ps
+Get-Content sql/schema.sql  | docker compose exec -T postgres psql -U logistics_user -d logistics
+Get-Content sql/seed.sql    | docker compose exec -T postgres psql -U logistics_user -d logistics
+Get-Content sql/indexes.sql | docker compose exec -T postgres psql -U logistics_user -d logistics
 ```
 
-All three services should be running and healthy.
+`schema.sql` runs once on an empty database. `seed.sql` and `indexes.sql` are safe to run again.
 
-### 7.6 Create the Database Schema
-
-Apply the SQL schema:
+## 5. Interactive Demo
 
 ```powershell
-Get-Content sql/schema.sql | docker compose exec -T postgres psql -U logistics_user -d logistics
+python demo.py
 ```
 
-### 7.7 Load Sample Data
+| Option | Shows |
+|---|---|
+| 1, 2 | All packages, or one package with its shipment and customer |
+| 3 | Process a scan through PostgreSQL, Redis and MongoDB |
+| 4 | Full tracking history from PostgreSQL |
+| 5 | Latest status through the Redis cache (reports a cache hit or miss) |
+| 6 | Scanner event documents stored in MongoDB |
+| 7 | Minutes between consecutive scans (CTE + `LAG()`) |
 
-```powershell
-Get-Content sql/seed.sql | docker compose exec -T postgres psql -U logistics_user -d logistics
+A suggested walkthrough: run option 3 for `TRK-1001`, then options 4, 5 and 6 to see the same scan in each store. Scanning a delivered package shows the scan being rejected.
+
+## 6. Tracking Scan Processing
+
+### 6.1 The PostgreSQL Transaction
+
+`process_tracking_scan(package_id, location_id, status, scanner_id=None, scan_metadata=None)` in `app/services/tracking_service.py`:
+
+1. Validates the inputs and checks that the status is supported.
+2. Locks the package row with `SELECT ... FOR UPDATE`, so concurrent scans of one package run one at a time.
+3. Rejects the scan if the package is already `Delivered` or `Returned`, because its journey is complete.
+4. Updates `packages.current_status`.
+5. Inserts the event into `tracking_events`.
+
+All of this runs in one transaction. The connection context in `app/database.py` commits only if every step succeeds and rolls back otherwise, so a status is never changed without its event, or the other way round. Every query uses `%s` parameters, never string formatting.
+
+### 6.2 Redis Cache
+
+`process_and_publish_tracking_scan()` in `app/services/tracking_integration.py` runs the transaction above, then updates Redis and MongoDB.
+
+Each package's latest status is cached under `package:<tracking_id>:status`:
+
+```json
+{"status": "In Transit", "location": "Kigali, Rwanda"}
 ```
 
-The seed script provides sample customers, shipments, packages, locations, and tracking events.
+`get_package_status(tracking_id)` reads this cache:
 
-The seed data includes tracking identifiers such as `TRK-1001`, `TRK-1002`, `TRK-1003`, and `TRK-1004`.
+- **Cache hit:** the value is returned from Redis.
+- **Cache miss:** the status is read from PostgreSQL, using the location of the latest event, and written back to Redis.
+- **Redis unavailable:** PostgreSQL still answers.
 
-## 8. Tracking Scan Processing
+Cached values expire after one hour. If a cache update ever fails, the old value cannot stay wrong for long, and the next read refreshes it.
 
-The main business operation is implemented in:
+### 6.3 MongoDB Scanner Log
 
-`app/services/tracking_service.py`
-
-The `process_tracking_scan()` function processes a package scan.
-
-Its responsibilities include:
-
-1. Validate the package ID, location ID, status, scanner ID, and metadata.
-2. Retrieve and update the package's current status.
-3. Insert a new tracking event.
-4. Commit both database changes in one transaction.
-5. Roll back the transaction if an error occurs.
-
-The package-status update and tracking-event insertion are handled together so that the PostgreSQL database does not retain only one of the two changes when an operation fails.
-
-SQL statements use parameters rather than string concatenation.
-
-### 8.1 Transaction Management
-
-`app/database.py` manages PostgreSQL connections using `psycopg2.pool.SimpleConnectionPool`.
-
-The connection manager:
-
-- Reuses database connections.
-- Commits successful operations.
-- Rolls back failed operations.
-- Returns connections to the pool.
-
-### 8.2 Redis Integration
-
-After a successful PostgreSQL scan, the integration service updates Redis using this key structure:
-
-```text
-package:<tracking_id>:status
-```
-
-Example:
-
-```text
-package:TRK-1001:status
-```
-
-The cached JSON value follows this structure:
+Each processed scan is stored in the `scanner_events` collection, for example:
 
 ```json
 {
-  "status": "In Transit",
-  "location": "Kigali Distribution Centre"
+  "event_id": 42, "package_id": 1, "tracking_id": "TRK-1001",
+  "location_id": 1, "location_name": "Kigali Distribution Centre",
+  "city": "Kigali", "country": "Rwanda",
+  "status": "In Transit", "scanner_id": "SCANNER-KGL-01",
+  "event_timestamp": "2026-10-30T06:08:57Z",
+  "scan_metadata": {"source": "dispatch"}
 }
 ```
 
-Redis provides a fast way to retrieve the latest package status without repeatedly querying the relational database.
+### 6.4 Consistency Between Stores
 
-### 8.3 MongoDB Integration
+PostgreSQL commits first. Redis and MongoDB are updated afterwards, outside the PostgreSQL transaction. If either fails, the scan stays committed, the error is logged and returned in `integration_errors`, and the other store is still attempted. PostgreSQL is always the source of truth: Redis expires and refills from it.
 
-MongoDB stores additional scanner-event information in the `scanner_events` collection.
+## 7. Analytics Queries
 
-A scanner-event document contains information such as:
+`sql/analytics.sql` contains three queries:
 
-- Package tracking identifier.
-- Scanner identifier.
-- Event timestamp.
-- Location context.
-- Additional scanner metadata.
+| Query | Technique | Answers |
+|---|---|---|
+| 1. Tracking history | CTE | Every scan for one package (`TRK-1001`), with locations, in time order |
+| 2. Time between scans | CTE + `LAG()` | Minutes since each package's previous scan |
+| 3. Latest event | `ROW_NUMBER()` | Each package's most recent scan, including packages not yet scanned |
 
-PostgreSQL remains the primary source of truth.
-
-**Transaction boundary:** PostgreSQL changes are committed before Redis and MongoDB are updated. The external-store operations are not part of the same distributed ACID transaction. If an external-store operation fails, the integration service records the failure rather than claiming that the PostgreSQL transaction was rolled back.
-
-## 9. Analytics and SQL Queries
-
-Analytical queries are located in:
-
-`sql/analytics.sql`
-
-The project demonstrates three important SQL techniques.
-
-### 9.1 Common Table Expressions (CTEs)
-
-CTEs organize complex queries into readable logical steps.
-
-The tracking-history query combines package information, tracking events, and locations to reconstruct a package's movement history.
-
-### 9.2 LAG() Window Function
-
-`LAG()` retrieves the previous tracking event for the same package.
-
-This makes it possible to calculate the time between consecutive tracking events.
-
-### 9.3 ROW_NUMBER() Window Function
-
-`ROW_NUMBER()` ranks tracking events for each package by timestamp.
-
-It can be used to identify the latest tracking event for every package.
-
-To execute the analytics queries:
+Events are ordered by `event_timestamp`, then `event_id`, so two scans with the same timestamp always come out in a fixed order.
 
 ```powershell
 Get-Content sql/analytics.sql | docker compose exec -T postgres psql -U logistics_user -d logistics
 ```
 
-Alternatively, open `sql/analytics.sql` in a PostgreSQL client and execute the individual queries.
+## 8. Query Optimization
 
-## 10. Query Optimization and Indexing
-
-The project evaluates tracking-history query performance using `EXPLAIN ANALYZE`.
-
-The benchmark script:
-
-`scripts/benchmark_tracking_queries.py`
-
-It creates a synthetic workload of:
-
-- 1,000 packages.
-- 200,000 tracking events.
-
-It measures query performance before and after creating a composite index.
-
-### 10.1 Composite Index
-
-The index is defined in `sql/indexes.sql`:
+Tracking history is read by filtering `tracking_events` on one package and ordering by time. The composite index in `sql/indexes.sql` supports exactly that access pattern:
 
 ```sql
 CREATE INDEX idx_tracking_events_package_timestamp
 ON tracking_events (package_id, event_timestamp);
 ```
 
-The index supports queries that filter tracking events by package and order them by timestamp.
+`scripts/benchmark_tracking_queries.py` loads 1,000 packages and 200,000 tracking events, then measures both queries with `EXPLAIN (ANALYZE, BUFFERS)` before and after creating the index. Each figure is the median of five runs; ranges cover three separate benchmark runs.
 
-### 10.2 Benchmark Results
+| Query | Before index | After index | Improvement |
+|---|---:|---:|---:|
+| Event lookup by `package_id` | 10.2 – 12.0 ms | 0.09 – 0.11 ms | ≈ 99% |
+| Tracking history (CTE + `LAG()`) | 15.2 – 18.5 ms | 0.41 – 0.47 ms | ≈ 97% |
 
-The recorded benchmark results were:
+Without the index, PostgreSQL scans every row in `tracking_events` (about 7,360 pages) to find one package's 200 events. With the index, it reads only those entries (75–80 pages), already ordered by time.
 
-| Metric | Before Index | After Index |
-|---|---:|---:|
-| Planning time | 0.168 ms | 0.229 ms |
-| Execution time | 20.116 ms | 0.421 ms |
-| Returned rows | 200 | 200 |
-| Query plan | Sequential scan | Index scan |
+The full method, query plans, and limitations are in the [performance report](docs/performance-report.md).
 
-<escape>**Recorded execution-time reduction: 97.91%.**</escape>
+```powershell
+python scripts/benchmark_tracking_queries.py
+```
 
-The query plan changed from a sequential scan and sorting operation to an index-based scan with incremental sorting.
+The benchmark can be run repeatedly. It works inside one transaction, removes its synthetic data afterwards, and leaves the index in place. Timings vary by machine; the change in query plan is the reliable result.
 
-These results are from the project's synthetic workload and a particular local database run. They should not be interpreted as a guaranteed performance improvement for every production workload.
+## 9. Testing and Verification
 
-For the full benchmark methodology, query-plan observations, and limitations, see:
-
-[`docs/performance-report.md`](docs/performance-report.md)
-
-**Important:** The benchmark script refuses to run if the benchmark index already exists. The benchmark has already been executed, and the index is retained in the database. Do not rerun it on the current database without first reviewing the script's cleanup and setup requirements.
-
-## 11. Testing and Code Quality
-
-The project uses `pytest` for automated tests.
-
-Run the test suite:
+The tests need the Docker services running with the schema and seed data loaded.
 
 ```powershell
 pytest -v
-```
-
-Run tests with coverage:
-
-```powershell
 pytest --cov=app --cov-report=term-missing
-```
-
-Run Ruff:
-
-```powershell
 ruff check .
-```
-
-Check Black formatting:
-
-```powershell
 black --check .
 ```
 
-Format files with Black when necessary:
+| Test file | Covers |
+|---|---|
+| `test_tracking_service.py` | Successful scan; invalid status; unknown package; rollback when the event insert fails; rejected scans after `Delivered`/`Returned` |
+| `test_analytics.py` | The `analytics.sql` queries against known data: history order, `LAG()` intervals per package, latest event with timestamp ties |
+| `test_tracking_integration.py` | Redis and MongoDB updates; each store failing independently; cache hit, miss and Redis-down fallback |
+| `test_database.py` | Connection and required tables |
+
+Database tests create their own data and remove it afterwards. Two scripts check the real services:
 
 ```powershell
-black .
+python scripts/verify_external_stores.py   # Redis and MongoDB read/write
+python scripts/verify_end_to_end_scan.py   # one real scan across all three stores, then cleanup
 ```
 
-### 11.1 External Store Verification
+## 10. Limitations
 
-Verify Redis and MongoDB connectivity:
-
-```powershell
-python scripts/verify_external_stores.py
-```
-
-The script performs temporary write/read checks against the external stores.
-
-### 11.2 End-to-End Tracking Verification
-
-Run:
-
-```powershell
-python scripts/verify_end_to_end_scan.py
-```
-
-This script performs a real tracking scan using the seeded database records and verifies the integration flow across PostgreSQL, Redis, and MongoDB. It also cleans up its verification data.
-
-## 12. Application Limitations
-
-This project is a backend service and database integration demonstration, not a complete production logistics platform.
-
-Current limitations include:
-
-- No public HTTP REST API or frontend application.
-- No authentication or role-based authorization.
-- No production deployment configuration.
-- No distributed transaction spanning PostgreSQL, Redis, and MongoDB.
-- No background retry or message-queue mechanism for failed external-store updates.
-- No real-time GPS tracking hardware integration.
-- No production-scale load testing.
-
-These limitations identify possible future improvements.
-
-## 13. Future Improvements
-
-Potential improvements include:
-
-- Expose tracking operations through a REST API using FastAPI or Flask.
-- Add authentication and authorization.
-- Introduce a background worker and message queue for reliable external-store synchronization.
-- Add retry policies and structured application logging.
-- Add API integration tests.
-- Build a shipment-tracking frontend.
-- Add deployment and monitoring configuration.
-- Evaluate indexing strategies against larger and more varied workloads.
-
-## 14. Conclusion
-
-The Logistics Shipment Tracking Backend demonstrates how relational databases, Python transactions, Redis, MongoDB, analytical SQL, and query optimization can work together in a backend application.
-
-PostgreSQL maintains consistent shipment and tracking records, Redis provides quick access to current package status, and MongoDB stores additional scanner information. Analytical queries provide visibility into package movement, while benchmarking demonstrates the effect of a composite index on a tracking-history query.
-
-The project brings together database design, backend development, integration, testing, and performance analysis in one practical application.
+- This is a backend data service only. There is no HTTP API, user interface or authentication.
+- Redis and MongoDB updates happen after the PostgreSQL commit and are not retried automatically. A failed cache update is corrected by expiry; a failed MongoDB write is logged but not replayed.
+- The event timestamp is the time the database records the scan. A scan uploaded late is recorded at upload time.
+- Benchmark figures come from synthetic data on a single development machine.
