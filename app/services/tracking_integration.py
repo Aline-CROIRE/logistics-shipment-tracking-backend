@@ -10,6 +10,14 @@ from app.services.tracking_service import process_tracking_scan
 
 logger = logging.getLogger(__name__)
 
+# Cached statuses expire so a missed cache update cannot stay stale forever.
+STATUS_CACHE_TTL_SECONDS = 3600
+
+
+def _status_cache_key(tracking_id: str) -> str:
+    """Build the Redis key that stores a package's latest status."""
+    return f"package:{tracking_id}:status"
+
 
 def _get_event_context(event_id: int) -> dict[str, Any]:
     """Read the committed event timestamp and location details."""
@@ -91,8 +99,9 @@ def process_and_publish_tracking_scan(
     try:
         redis_client = get_redis_client()
         redis_client.set(
-            f'package:{scan["tracking_id"]}:status',
+            _status_cache_key(scan["tracking_id"]),
             json.dumps(cache_value),
+            ex=STATUS_CACHE_TTL_SECONDS,
         )
     except Exception as exc:
         logger.exception("Redis status cache update failed")
@@ -120,3 +129,70 @@ def process_and_publish_tracking_scan(
         result["integration_errors"]["mongodb"] = str(exc)
 
     return result
+
+
+def _load_status_from_database(tracking_id: str) -> dict[str, Any] | None:
+    """Read a package's current status and latest scan location."""
+    with get_db_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+                p.current_status,
+                latest.city,
+                latest.country
+            FROM packages AS p
+            LEFT JOIN LATERAL (
+                SELECT location.city, location.country
+                FROM tracking_events AS event
+                JOIN locations AS location
+                    ON location.location_id = event.location_id
+                WHERE event.package_id = p.package_id
+                ORDER BY event.event_timestamp DESC, event.event_id DESC
+                LIMIT 1
+            ) AS latest ON TRUE
+            WHERE p.tracking_id = %s
+            """,
+            (tracking_id,),
+        )
+        row = cursor.fetchone()
+
+    if row is None:
+        return None
+
+    status, city, country = row
+    return {
+        "status": status,
+        "location": f"{city}, {country}" if city is not None else None,
+    }
+
+
+def get_package_status(tracking_id: str) -> dict[str, Any] | None:
+    """Return a package's latest status, using Redis before PostgreSQL.
+
+    On a cache miss the status is read from PostgreSQL and cached. If Redis
+    is unavailable, PostgreSQL still answers. Returns None for unknown
+    packages. The "source" field shows where the value came from.
+    """
+    cache_key = _status_cache_key(tracking_id)
+
+    try:
+        cached_value = get_redis_client().get(cache_key)
+        if cached_value is not None:
+            return {**json.loads(cached_value), "source": "redis"}
+    except Exception:
+        logger.exception("Redis status lookup failed; using PostgreSQL")
+
+    status = _load_status_from_database(tracking_id)
+    if status is None:
+        return None
+
+    try:
+        get_redis_client().set(
+            cache_key,
+            json.dumps(status),
+            ex=STATUS_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        logger.exception("Redis status cache refresh failed")
+
+    return {**status, "source": "postgresql"}
