@@ -378,52 +378,33 @@ Alternatively, open `sql/analytics.sql` in a PostgreSQL client and execute the i
 
 ## 10. Query Optimization and Indexing
 
-The project evaluates tracking-history query performance using `EXPLAIN ANALYZE`.
-
-The benchmark script:
-
-`scripts/benchmark_tracking_queries.py`
-
-It creates a synthetic workload of:
-
-- 1,000 packages.
-- 200,000 tracking events.
-
-It measures query performance before and after creating a composite index.
-
-### 10.1 Composite Index
-
-The index is defined in `sql/indexes.sql`:
+Tracking history is read by filtering `tracking_events` on one package and ordering by time. The composite index in `sql/indexes.sql` supports exactly that access pattern:
 
 ```sql
 CREATE INDEX idx_tracking_events_package_timestamp
 ON tracking_events (package_id, event_timestamp);
 ```
 
-The index supports queries that filter tracking events by package and order them by timestamp.
+### 10.1 Benchmark Results
 
-### 10.2 Benchmark Results
+`scripts/benchmark_tracking_queries.py` loads 1,000 packages and 200,000 tracking events, then measures both queries with `EXPLAIN (ANALYZE, BUFFERS)` before and after creating the index. Each figure is the median of five runs; ranges cover three separate benchmark runs.
 
-The recorded benchmark results were:
+| Query | Before index | After index | Improvement |
+|---|---:|---:|---:|
+| Event lookup by `package_id` | 10.2 – 12.0 ms | 0.09 – 0.11 ms | ≈ 99% |
+| Tracking history (CTE + `LAG()`) | 15.2 – 18.5 ms | 0.41 – 0.47 ms | ≈ 97% |
 
-| Metric | Before Index | After Index |
-|---|---:|---:|
-| Planning time | 0.168 ms | 0.229 ms |
-| Execution time | 20.116 ms | 0.421 ms |
-| Returned rows | 200 | 200 |
-| Query plan | Sequential scan | Index scan |
+Without the index, PostgreSQL scans every row in `tracking_events` (about 7,360 pages) to find one package's 200 events. With the index, it reads only those entries (75–80 pages), already ordered by time.
 
-<escape>**Recorded execution-time reduction: 97.91%.**</escape>
+The full method, query plans, and limitations are in the [performance report](docs/performance-report.md).
 
-The query plan changed from a sequential scan and sorting operation to an index-based scan with incremental sorting.
+### 10.2 Running the Benchmark
 
-These results are from the project's synthetic workload and a particular local database run. They should not be interpreted as a guaranteed performance improvement for every production workload.
+```powershell
+python scripts/benchmark_tracking_queries.py
+```
 
-For the full benchmark methodology, query-plan observations, and limitations, see:
-
-[`docs/performance-report.md`](docs/performance-report.md)
-
-**Important:** The benchmark script refuses to run if the benchmark index already exists. The benchmark has already been executed, and the index is retained in the database. Do not rerun it on the current database without first reviewing the script's cleanup and setup requirements.
+The script can be run repeatedly. It works inside one transaction, removes its synthetic data afterwards, and leaves the index in place. Timings vary by machine; the change in query plan is the reliable result.
 
 ## 11. Testing and Code Quality
 
