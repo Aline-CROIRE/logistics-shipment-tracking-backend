@@ -2,3 +2,5 @@
 # Let the `pytest` command import the `app` package from the project root.
 pythonpath = ["."]
 testpaths = ["tests"]
+# Always show why a test was skipped (e.g. PostgreSQL not running).
+addopts = "-rs"

@@ -12,6 +12,8 @@ from app.services.tracking_service import (
     process_tracking_scan,
 )
 
+pytestmark = pytest.mark.usefixtures("require_postgres")
+
 
 @pytest.fixture
 def test_package():

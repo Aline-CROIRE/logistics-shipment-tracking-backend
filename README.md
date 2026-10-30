@@ -280,7 +280,7 @@ The benchmark can be run repeatedly. It works inside one transaction, removes it
 
 ## 9. Testing and Verification
 
-The tests need the Docker services running with the schema and seed data loaded.
+Run the tests with the Docker services running and the schema and seed data loaded. If PostgreSQL cannot be reached, the database tests are skipped with the reason shown, and the mocked Redis and MongoDB tests still run.
 
 ```powershell
 pytest -v
