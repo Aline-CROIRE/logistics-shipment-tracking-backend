@@ -7,6 +7,7 @@ import pytest
 
 from app.database import get_db_connection
 from app.services.tracking_service import (
+    InvalidStatusTransitionError,
     PackageNotFoundError,
     process_tracking_scan,
 )
@@ -139,3 +140,33 @@ def test_failed_event_insert_rolls_back_package_update(test_package):
             (test_package["package_id"],),
         )
         assert cursor.fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("final_status", ["Delivered", "Returned"])
+def test_package_in_final_status_rejects_further_scans(test_package, final_status):
+    """A delivered or returned package must not be moved to another status."""
+    process_tracking_scan(
+        package_id=test_package["package_id"],
+        location_id=test_package["location_id"],
+        status=final_status,
+    )
+
+    with pytest.raises(InvalidStatusTransitionError, match=final_status):
+        process_tracking_scan(
+            package_id=test_package["package_id"],
+            location_id=test_package["location_id"],
+            status="In Transit",
+        )
+
+    with get_db_connection() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT current_status FROM packages WHERE package_id = %s",
+            (test_package["package_id"],),
+        )
+        assert cursor.fetchone()[0] == final_status
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM tracking_events WHERE package_id = %s",
+            (test_package["package_id"],),
+        )
+        assert cursor.fetchone()[0] == 1

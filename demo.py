@@ -13,8 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.database import close_connection_pool, get_db_connection
-from app.external_stores import get_mongo_collection, get_redis_client
-from app.services.tracking_integration import process_and_publish_tracking_scan
+from app.external_stores import get_mongo_collection
+from app.services.tracking_integration import (
+    get_package_status,
+    process_and_publish_tracking_scan,
+)
 
 STATUSES = [
     "Created",
@@ -223,13 +226,18 @@ def process_new_scan() -> None:
 
     print("\nProcessing scan...")
 
-    result = process_and_publish_tracking_scan(
-        package_id=package["package_id"],
-        location_id=location["location_id"],
-        status=status,
-        scanner_id=scanner_id,
-        scan_metadata=metadata,
-    )
+    try:
+        result = process_and_publish_tracking_scan(
+            package_id=package["package_id"],
+            location_id=location["location_id"],
+            status=status,
+            scanner_id=scanner_id,
+            scan_metadata=metadata,
+        )
+    except ValueError as exc:
+        print(f"\nScan rejected: {exc}")
+        print("No changes were made.")
+        return
 
     print("\nPostgreSQL tracking operation completed.")
     print(f'Event ID: {result["event_id"]}')
@@ -290,7 +298,7 @@ def show_tracking_history() -> None:
 
 
 def show_redis_status() -> None:
-    """Retrieve the latest cached package status from Redis."""
+    """Retrieve the latest status through the Redis cache."""
     print_header("REDIS LATEST STATUS")
 
     tracking_id = input("Enter tracking ID: ").strip().upper()
@@ -299,23 +307,20 @@ def show_redis_status() -> None:
         print("Tracking ID cannot be empty.")
         return
 
-    redis_client = get_redis_client()
-    redis_client.ping()
+    status = get_package_status(tracking_id)
 
-    redis_key = f"package:{tracking_id}:status"
-    cached_value = redis_client.get(redis_key)
-
-    if cached_value is None:
-        print(f"No cached status found for {tracking_id}.")
+    if status is None:
+        print(f"Package {tracking_id} was not found.")
         return
 
-    print(f"Redis key: {redis_key}")
-    print("Cached value:")
+    source = status.pop("source")
+    print(f"Redis key: package:{tracking_id}:status")
+    if source == "redis":
+        print("Cache hit: value returned from Redis.")
+    else:
+        print("Cache miss: value loaded from PostgreSQL.")
 
-    try:
-        print(json.dumps(json.loads(cached_value), indent=4))
-    except json.JSONDecodeError:
-        print(cached_value)
+    print(json.dumps(status, indent=4))
 
 
 def show_mongodb_logs() -> None:
