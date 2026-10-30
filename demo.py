@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import psycopg2
+from pymongo.errors import PyMongoError
+from redis.exceptions import RedisError
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -453,7 +457,13 @@ def main() -> None:
 
             try:
                 action()
-            except Exception as exc:
+            except (
+                psycopg2.Error,
+                RedisError,
+                PyMongoError,
+                ValueError,
+                LookupError,
+            ) as exc:
                 print(f"\nOperation failed: {exc}")
                 print(
                     "Check that PostgreSQL, Redis, and MongoDB are running "
