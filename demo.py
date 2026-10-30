@@ -223,13 +223,18 @@ def process_new_scan() -> None:
 
     print("\nProcessing scan...")
 
-    result = process_and_publish_tracking_scan(
-        package_id=package["package_id"],
-        location_id=location["location_id"],
-        status=status,
-        scanner_id=scanner_id,
-        scan_metadata=metadata,
-    )
+    try:
+        result = process_and_publish_tracking_scan(
+            package_id=package["package_id"],
+            location_id=location["location_id"],
+            status=status,
+            scanner_id=scanner_id,
+            scan_metadata=metadata,
+        )
+    except ValueError as exc:
+        print(f"\nScan rejected: {exc}")
+        print("No changes were made.")
+        return
 
     print("\nPostgreSQL tracking operation completed.")
     print(f'Event ID: {result["event_id"]}')
