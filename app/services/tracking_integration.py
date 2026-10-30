@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from app.database import get_db_connection
@@ -121,6 +122,7 @@ def process_and_publish_tracking_scan(
                 "status": scan["status"],
                 "scanner_id": scan["scanner_id"],
                 "event_timestamp": timestamp,
+                "received_at": datetime.now(UTC),
                 "scan_metadata": scan_metadata or {},
             }
         )

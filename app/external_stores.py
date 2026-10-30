@@ -5,7 +5,7 @@ from functools import lru_cache
 
 import redis
 from dotenv import load_dotenv
-from pymongo import MongoClient
+from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 
 load_dotenv()
@@ -32,4 +32,18 @@ def get_mongo_collection() -> Collection:
         serverSelectionTimeoutMS=3000,
     )
     database_name = os.getenv("MONGODB_DATABASE", "logistics")
-    return client[database_name]["scanner_events"]
+    collection = client[database_name]["scanner_events"]
+
+    # create_index does nothing if the index already exists.
+    # Each PostgreSQL event is logged at most once. Documents without an
+    # event_id, such as connectivity checks, are outside this rule.
+    collection.create_index(
+        "event_id",
+        unique=True,
+        partialFilterExpression={"event_id": {"$exists": True}},
+    )
+    # Supports reading one package's scanner events, newest first.
+    collection.create_index(
+        [("tracking_id", ASCENDING), ("event_timestamp", DESCENDING)]
+    )
+    return collection
