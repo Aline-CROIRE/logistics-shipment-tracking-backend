@@ -1,6 +1,6 @@
 """Validate tracking analytics and benchmark the composite index."""
 
-import json
+import statistics
 import sys
 import uuid
 from pathlib import Path
@@ -14,6 +14,61 @@ from app.database import get_db_connection
 PACKAGE_COUNT = 1_000
 EVENT_COUNT = 200_000
 INDEX_NAME = "idx_tracking_events_package_timestamp"
+MEASURED_RUNS = 5
+# A package from the middle of the id range avoids favouring early rows.
+TARGET_SEQUENCE = PACKAGE_COUNT // 2
+
+# Direct lookup of one package's events, ordered by time.
+EVENT_LOOKUP_QUERY = """
+    SELECT event_id, event_timestamp
+    FROM tracking_events
+    WHERE package_id = %s
+    ORDER BY event_timestamp, event_id
+"""
+
+# Full tracking history with elapsed time between scans (CTE + LAG).
+# Matches the package-level analytics query used by demo.py.
+HISTORY_QUERY = """
+    WITH package_history AS (
+        SELECT
+            p.package_id,
+            p.tracking_id,
+            event.event_id,
+            event.status,
+            event.event_timestamp,
+            location.city,
+            location.country,
+            LAG(event.event_timestamp) OVER (
+                PARTITION BY p.package_id
+                ORDER BY event.event_timestamp, event.event_id
+            ) AS previous_event_timestamp
+        FROM packages AS p
+        JOIN tracking_events AS event
+            ON event.package_id = p.package_id
+        JOIN locations AS location
+            ON location.location_id = event.location_id
+        WHERE p.tracking_id = %s
+    )
+    SELECT
+        tracking_id,
+        status,
+        city,
+        country,
+        event_timestamp,
+        previous_event_timestamp,
+        ROUND(
+            (
+                EXTRACT(
+                    EPOCH FROM (
+                        event_timestamp - previous_event_timestamp
+                    )
+                ) / 60
+            )::numeric,
+            2
+        ) AS minutes_since_previous_scan
+    FROM package_history
+    ORDER BY event_timestamp, event_id
+"""
 
 
 def summarize_plan(plan_result: list[dict[str, Any]]) -> dict[str, Any]:
@@ -42,20 +97,69 @@ def summarize_plan(plan_result: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def explain_package_history(cursor: Any, package_id: int) -> dict[str, Any]:
-    """Run and summarize an actual execution plan."""
-    cursor.execute(
-        """
-        EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-        SELECT event_id, event_timestamp
-        FROM tracking_events
-        WHERE package_id = %s
-        ORDER BY event_timestamp, event_id
-        """,
-        (package_id,),
-    )
+def measure_query(cursor: Any, query: str, parameters: tuple) -> dict[str, Any]:
+    """Run EXPLAIN ANALYZE several times and summarize the timings."""
+    # Warm-up run so the first measurement is not penalized by cold caches.
+    cursor.execute(query, parameters)
+    cursor.fetchall()
 
-    return summarize_plan(cursor.fetchone()[0])
+    runs = []
+    for _ in range(MEASURED_RUNS):
+        cursor.execute(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query,
+            parameters,
+        )
+        runs.append(summarize_plan(cursor.fetchone()[0]))
+
+    cursor.execute("EXPLAIN (ANALYZE, BUFFERS) " + query, parameters)
+    plan_text = "\n".join(row[0] for row in cursor.fetchall())
+
+    execution_times = [run["execution_ms"] for run in runs]
+    return {
+        "median_ms": statistics.median(execution_times),
+        "min_ms": min(execution_times),
+        "max_ms": max(execution_times),
+        "planning_ms": statistics.median(run["planning_ms"] for run in runs),
+        "actual_rows": runs[-1]["actual_rows"],
+        "nodes": runs[-1]["nodes"],
+        "indexes": runs[-1]["indexes"],
+        "plan_text": plan_text,
+    }
+
+
+def print_measurement(title: str, measurement: dict[str, Any]) -> None:
+    """Display timing statistics and a representative query plan."""
+    print(f"\n=== {title} ===")
+    print(
+        f"Execution time over {MEASURED_RUNS} runs: "
+        f"median {measurement['median_ms']:.3f} ms "
+        f"(min {measurement['min_ms']:.3f}, max {measurement['max_ms']:.3f})"
+    )
+    print(f"Median planning time: {measurement['planning_ms']:.3f} ms")
+    print(f"Rows returned: {measurement['actual_rows']}")
+    print(f"Indexes used: {', '.join(measurement['indexes']) or 'none'}")
+    print("Representative plan:")
+    print(measurement["plan_text"])
+
+
+def print_comparison(name: str, before: dict[str, Any], after: dict[str, Any]) -> None:
+    """Compare median execution times before and after indexing."""
+    before_ms = before["median_ms"]
+    after_ms = after["median_ms"]
+
+    print(f"\n=== PERFORMANCE COMPARISON: {name} ===")
+    print(f"Before index (median): {before_ms:.3f} ms")
+    print(f"After index (median):  {after_ms:.3f} ms")
+
+    if before_ms > 0:
+        change = (before_ms - after_ms) / before_ms * 100
+        print(f"Execution-time improvement: {change:.2f}%")
+        if change > 0:
+            print("The indexed query was faster in this run.")
+        elif change < 0:
+            print("The indexed query was slower in this run.")
+        else:
+            print("Execution times were equal in this run.")
 
 
 def validate_analytics(cursor: Any) -> None:
@@ -86,7 +190,6 @@ def main() -> None:
     token = uuid.uuid4().hex
     tracking_prefix = f"BENCHMARK-{token}-"
     scanner_id = f"BENCHMARK-{token}"
-    index_created = False
 
     with get_db_connection() as connection, connection.cursor() as cursor:
         validate_analytics(cursor)
@@ -102,11 +205,7 @@ def main() -> None:
             """,
             (INDEX_NAME,),
         )
-        if cursor.fetchone()[0]:
-            raise RuntimeError(
-                f"{INDEX_NAME} already exists. "
-                "The baseline benchmark needs to run before index creation."
-            )
+        index_existed = cursor.fetchone()[0]
 
         cursor.execute("SELECT shipment_id FROM shipments ORDER BY shipment_id LIMIT 1")
         shipment_row = cursor.fetchone()
@@ -124,6 +223,11 @@ def main() -> None:
         cursor.execute("SAVEPOINT benchmark_data")
 
         try:
+            if index_existed:
+                # DDL is transactional, so a failure rolls this drop back.
+                # The index is recreated below, leaving the schema unchanged.
+                cursor.execute(f"DROP INDEX {INDEX_NAME}")
+
             cursor.execute(
                 """
                 INSERT INTO packages (
@@ -183,51 +287,64 @@ def main() -> None:
                 (location_id, scanner_id, EVENT_COUNT, PACKAGE_COUNT),
             )
 
-            cursor.execute("""
-                SELECT package_id
-                FROM benchmark_package_ids
-                WHERE seq = 42
-                """)
+            cursor.execute(
+                """
+                SELECT p.package_id, p.tracking_id
+                FROM benchmark_package_ids AS package_ids
+                JOIN packages AS p
+                    ON p.package_id = package_ids.package_id
+                WHERE package_ids.seq = %s
+                """,
+                (TARGET_SEQUENCE,),
+            )
             target_row = cursor.fetchone()
             if target_row is None:
                 raise RuntimeError("Could not find the benchmark package.")
 
-            target_package_id = target_row[0]
+            target_package_id, target_tracking_id = target_row
+            benchmarks = [
+                (
+                    "Event lookup by package_id",
+                    EVENT_LOOKUP_QUERY,
+                    (target_package_id,),
+                ),
+                (
+                    "Tracking history with CTE and LAG()",
+                    HISTORY_QUERY,
+                    (target_tracking_id,),
+                ),
+            ]
 
-            cursor.execute("ANALYZE tracking_events")
-            before = explain_package_history(cursor, target_package_id)
+            print(
+                f"\nBenchmark data: {PACKAGE_COUNT} packages, "
+                f"{EVENT_COUNT} tracking events. "
+                f"Target package: {target_tracking_id}"
+            )
 
-            print("\n=== BEFORE INDEX ===")
-            print(json.dumps(before, indent=2))
+            # Both tables changed, so refresh planner statistics for both.
+            cursor.execute("ANALYZE packages, tracking_events")
+            before = {
+                name: measure_query(cursor, query, parameters)
+                for name, query, parameters in benchmarks
+            }
+            for name, measurement in before.items():
+                print_measurement(f"BEFORE INDEX: {name}", measurement)
 
             cursor.execute(f"""
                 CREATE INDEX {INDEX_NAME}
                 ON tracking_events (package_id, event_timestamp)
                 """)
-            index_created = True
 
-            cursor.execute("ANALYZE tracking_events")
-            after = explain_package_history(cursor, target_package_id)
+            cursor.execute("ANALYZE packages, tracking_events")
+            after = {
+                name: measure_query(cursor, query, parameters)
+                for name, query, parameters in benchmarks
+            }
+            for name, measurement in after.items():
+                print_measurement(f"AFTER INDEX: {name}", measurement)
 
-            print("\n=== AFTER INDEX ===")
-            print(json.dumps(after, indent=2))
-
-            before_ms = before["execution_ms"]
-            after_ms = after["execution_ms"]
-
-            print("\n=== PERFORMANCE COMPARISON ===")
-            print(f"Before execution time: {before_ms:.3f} ms")
-            print(f"After execution time:  {after_ms:.3f} ms")
-
-            if before_ms > 0:
-                change = (before_ms - after_ms) / before_ms * 100
-                print(f"Execution-time improvement: {change:.2f}%")
-                if change > 0:
-                    print("The indexed query was faster in this run.")
-                elif change < 0:
-                    print("The indexed query was slower in this run.")
-                else:
-                    print("Execution times were equal in this run.")
+            for name, _, _ in benchmarks:
+                print_comparison(name, before[name], after[name])
 
             cursor.execute(
                 "DELETE FROM tracking_events WHERE scanner_id = %s",
@@ -237,11 +354,13 @@ def main() -> None:
                 "DELETE FROM packages WHERE tracking_id LIKE %s",
                 (tracking_prefix + "%",),
             )
-            cursor.execute("ANALYZE tracking_events")
+            cursor.execute("ANALYZE packages, tracking_events")
             cursor.execute("RELEASE SAVEPOINT benchmark_data")
 
             print("\nPASS: Synthetic tracking events and packages removed")
-            if index_created:
+            if index_existed:
+                print(f"PASS: Index {INDEX_NAME} recreated")
+            else:
                 print(f"PASS: Index {INDEX_NAME} created")
 
         except Exception:
